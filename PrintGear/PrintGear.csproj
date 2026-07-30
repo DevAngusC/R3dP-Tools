@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Rhino3DPrintSupport</AssemblyName>
+    <RootNamespace>PrintGear</RootNamespace>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <RhinoSystemDir Condition="'$(RhinoSystemDir)' == ''">C:\Program Files\Rhino 8\System\netcore</RhinoSystemDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="RhinoCommon">
+      <HintPath>$(RhinoSystemDir)\RhinoCommon.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="CreateRhinoPlugin" AfterTargets="Build">
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(TargetDir)$(AssemblyName).rhp" />
+  </Target>
+</Project>
