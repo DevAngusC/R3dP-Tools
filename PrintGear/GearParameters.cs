@@ -17,6 +17,7 @@ public readonly record struct GearParameters(
 {
     public double PitchRadius => Module * Teeth / 2.0;
     public double OutsideRadius => PitchRadius + Module;
+    public double OutsideDiameter => OutsideRadius * 2.0;
     public double RootRadius => Math.Max(Module * (Teeth / 2.0 - 1.25), Module * 0.2);
     public double EffectiveBoreDiameter => Math.Max(0.0, BoreDiameter + BoreCompensation);
     public double EffectiveHubDiameter => Math.Max(HubDiameter, EffectiveBoreDiameter);
