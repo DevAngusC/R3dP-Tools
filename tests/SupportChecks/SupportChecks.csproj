@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
+    <RhinoSystemDir Condition="'$(RhinoSystemDir)' == ''">C:\Program Files\Rhino 8\System\netcore</RhinoSystemDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="RhinoCommon"><HintPath>$(RhinoSystemDir)\RhinoCommon.dll</HintPath><Private>false</Private></Reference>
+    <Compile Include="../../PrintGear/ContinuousChamferSupportBuilder.cs" Link="ContinuousChamferSupportBuilder.cs" />
+    <Compile Include="../../PrintGear/SupportParameters.cs" Link="SupportParameters.cs" />
+  </ItemGroup>
+</Project>

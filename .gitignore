@@ -1,5 +1,6 @@
 **/bin/
 **/obj/
+.dotnet-cli-home/
 .vs/
 .vscode/
 .idea/

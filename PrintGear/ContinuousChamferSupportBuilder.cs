@@ -1,4 +1,4 @@
-using Rhino;
+﻿using Rhino;
 using Rhino.Geometry;
 using Rhino.Geometry.Intersect;
 
@@ -20,6 +20,7 @@ internal static class ContinuousChamferSupportBuilder
         Curve contactEdge,
         SupportParameters parameters,
         double tipLineWidth,
+        int toothCount,
         double tolerance,
         out int contactCount,
         out ContinuousChamferBuildReport buildReport,
@@ -32,18 +33,18 @@ internal static class ContinuousChamferSupportBuilder
             return null;
         if (parameters.ContactClearance <= tolerance * 8.0)
         {
-            error = "齒水平伸長XY必須大於文件絕對公差的八倍。";
+            error = "齒尖長必須大於文件絕對公差的八倍。";
             return null;
         }
         if (!RhinoMath.IsValidDouble(tipLineWidth) ||
             tipLineWidth <= tolerance * 4.0)
         {
-            error = "齒尖線寬XY必須大於文件絕對公差的四倍。";
+            error = "噴嘴尺寸必須大於文件絕對公差的四倍。";
             return null;
         }
         if (tipLineWidth > parameters.Thickness + tolerance)
         {
-            error = "齒尖線寬XY不可大於支撐厚度。";
+            error = "噴嘴尺寸不可大於支撐厚度。";
             return null;
         }
         if (!outline.IsValid || !outline.IsClosed)
@@ -113,15 +114,9 @@ internal static class ContinuousChamferSupportBuilder
         var minimumZ = bounds.Min.Z;
         var maximumZ = bounds.Max.Z;
         var toothHeight = parameters.ContactWidth;
-        var toothPitch = parameters.ContactSpacing;
-        if (maximumZ - minimumZ < toothHeight - tolerance)
+        if (toothCount < 2 || toothCount > MaximumToothCount)
         {
-            error = "所選接觸邊的 Z 高度不足以放置一個方塊接觸齒。";
-            return null;
-        }
-        if (toothPitch <= tolerance * 4.0)
-        {
-            error = "沿線齒距必須大於文件絕對公差的四倍。";
+            error = $"沿線齒尖數量均分必須介於 2 至 {MaximumToothCount} 顆（包含頭尾）。";
             return null;
         }
 
@@ -173,12 +168,58 @@ internal static class ContinuousChamferSupportBuilder
         var endSafety = Math.Max(tolerance * 4.0, toothHeight * 0.005);
         var firstCenterZ = minimumZ + halfHeight + endSafety;
         var lastCenterZ = maximumZ - halfHeight - endSafety;
-        if (firstCenterZ > lastCenterZ + tolerance ||
+        // At a triangular apex the available root width tends to zero. Locate the
+        // nearest complete tooth at each end before distributing the requested count.
+        bool CanPlaceEnd(double centerZ)
+        {
+            if(!TryTrimAtWorldZBand(distributionEdge,centerZ-halfHeight,centerZ+halfHeight,tolerance,out var piece))
+                return false;
+            using(piece)
+            {
+                if(!TryCreateContactBandTooth(piece,outline,plane,horizontalOutward,
+                    parameters.ContactClearance,toothHeight,tipLineWidth,tolerance,out var trial))return false;
+                trial.Dispose();return true;
+            }
+        }
+        bool FindUsableEnd(double start,double limit,out double usable)
+        {
+            usable=start;
+            if(CanPlaceEnd(start))return true;
+            var sign=Math.Sign(limit-start);
+            var step=Math.Max(tolerance*4,toothHeight*.05);
+            var bad=start;
+            while(Math.Abs(bad-limit)>tolerance)
+            {
+                var good=start+sign*Math.Min(step,Math.Abs(limit-start));
+                if(CanPlaceEnd(good))
+                {
+                    for(var iteration=0;iteration<24 && Math.Abs(good-bad)>tolerance*.1;iteration++)
+                    {
+                        var mid=(bad+good)/2;
+                        if(CanPlaceEnd(mid))good=mid;else bad=mid;
+                    }
+                    usable=good+sign*Math.Min(tolerance*2,Math.Abs(limit-good));
+                    return CanPlaceEnd(usable);
+                }
+                bad=good;step*=2;
+            }
+            return false;
+        }
+        var middleZ=(firstCenterZ+lastCenterZ)/2;
+        if(firstCenterZ>=lastCenterZ ||
+            !FindUsableEnd(firstCenterZ,middleZ,out firstCenterZ) ||
+            !FindUsableEnd(lastCenterZ,middleZ,out lastCenterZ))
+        {
+            error="輪廓端部沒有足夠空間容納完整齒根；請加寬輪廓或減小齒尺寸。";
+            return null;
+        }
+        if (firstCenterZ >= lastCenterZ - tolerance ||
             !TryParameterAtWorldZ(
                 distributionEdge,
                 firstCenterZ,
                 tolerance,
-                out var firstCenterParameter))
+                out var firstCenterParameter) ||
+            !TryParameterAtWorldZ(distributionEdge, lastCenterZ, tolerance, out var lastCenterParameter))
         {
             error = "接觸邊端點附近沒有足夠空間放置完整高度的方塊齒。";
             return null;
@@ -188,6 +229,8 @@ internal static class ContinuousChamferSupportBuilder
             new Interval(
                 distributionEdge.Domain.Min,
                 firstCenterParameter));
+        var lastCenterLength = distributionEdge.GetLength(
+            new Interval(distributionEdge.Domain.Min, lastCenterParameter));
         var totalLength = distributionEdge.GetLength();
         if (!RhinoMath.IsValidDouble(firstCenterLength) ||
             !RhinoMath.IsValidDouble(totalLength) ||
@@ -197,33 +240,25 @@ internal static class ContinuousChamferSupportBuilder
             return null;
         }
 
-        var requestedCount = 0;
+        var requestedCount = toothCount;
         var teeth = new List<(double AlongEdgeDistance, Brep Solid)>();
-        for (var alongEdgeDistance = firstCenterLength;
-             alongEdgeDistance <= totalLength + tolerance;
-             alongEdgeDistance += toothPitch)
+        var previousCenterZ = double.NegativeInfinity;
+        for (var index = 0; index < toothCount; index++)
         {
-            if (requestedCount >= MaximumToothCount)
+            var alongEdgeDistance = firstCenterLength +
+                (lastCenterLength - firstCenterLength) * index / (toothCount - 1);
+            if (!distributionEdge.LengthParameter(alongEdgeDistance, out var centerParameter))
             {
-                error =
-                    $"接觸齒數量超過 {MaximumToothCount}；" +
-                    "請增加沿線齒距或縮短接觸邊。";
+                error = "無法計算均分齒尖位置，未輸出支撐。";
                 return null;
             }
-            if (!distributionEdge.LengthParameter(
-                    Math.Min(alongEdgeDistance, totalLength),
-                    out var centerParameter))
-            {
-                continue;
-            }
-
             var contactPoint = distributionEdge.PointAt(centerParameter);
-            if (contactPoint.Z > lastCenterZ + tolerance)
-                break;
-            if (contactPoint.Z < firstCenterZ - tolerance)
-                continue;
-
-            requestedCount++;
+            if (contactPoint.Z - previousCenterZ <= toothHeight + tolerance * 4.0)
+            {
+                error = "均分齒尖過密，完整齒形之間沒有足夠間隙；請減少齒尖數量或列印厚度。";
+                return null;
+            }
+            previousCenterZ = contactPoint.Z;
             try
             {
                 if (TryTrimAtWorldZBand(
@@ -248,16 +283,14 @@ internal static class ContinuousChamferSupportBuilder
             }
             catch
             {
-                // A malformed local contact band is skipped without discarding
-                // the rest of the support.
+                // Reject incomplete tooth sets below, including either missing end tooth.
             }
         }
 
-        if (requestedCount == 0 || teeth.Count == 0)
+        if (teeth.Count != requestedCount)
         {
             error =
-                "所選接觸邊沒有產生任何有效的方塊接觸齒；" +
-                "未輸出只有主體、沒有接觸齒的不完整支撐。";
+                "無法建立全部指定齒尖（包含頭尾）；請調整輪廓或齒尺寸，未輸出不完整支撐。";
             return null;
         }
 
@@ -298,13 +331,12 @@ internal static class ContinuousChamferSupportBuilder
             sequentialCount++;
         }
 
-        if (sequentialCount == 0 ||
+        if (sequentialCount != requestedCount ||
             !IsUsableSolid(sequentialSupport) ||
             !HasAddedVolume(chamferedBody, sequentialSupport, tolerance))
         {
             error =
-                "方塊接觸齒的批次與逐顆合併都失敗；" +
-                "未輸出只有主體、沒有接觸齒的不完整支撐。";
+                "無法合併全部指定齒尖（包含頭尾）；未輸出缺齒支撐。";
             return null;
         }
 

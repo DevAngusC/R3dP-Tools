@@ -11,4 +11,6 @@ public sealed class PrintGearPlugin : PlugIn
     }
 
     public static PrintGearPlugin? Instance { get; private set; }
+
+    public override PlugInLoadTime LoadTime => PlugInLoadTime.AtStartup;
 }

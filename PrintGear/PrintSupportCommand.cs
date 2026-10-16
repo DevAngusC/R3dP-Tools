@@ -1,4 +1,4 @@
-using System.Drawing;
+﻿using System.Drawing;
 using Rhino;
 using Rhino.Commands;
 using Rhino.DocObjects;
@@ -10,16 +10,14 @@ using Rhino.UI;
 namespace PrintGear;
 
 [System.Runtime.InteropServices.Guid("3D270D7A-69E2-43A4-952A-ED1C3530477C")]
-public sealed class PrintSupportCommand : Command
+public sealed partial class PrintSupportCommand : Command
 {
-    private static SupportInputMode lastInputMode = SupportInputMode.ProfileEdge;
+    private static int lastSupportType;
     private static double lastThicknessMillimeters = 2.0;
-    private static double lastClearanceMillimeters = 0.25;
-    private static double lastContactWidthMillimeters = 0.4;
-    private static double lastContactSpacingMillimeters = 5.0;
-    private static double lastTipLineWidthMillimeters = 0.4;
-    private static double lastFootExtensionMillimeters = 2.0;
-    private static double lastBaseHeight;
+    private static double lastToothLengthMillimeters = 0.4;
+    private static int lastToothCount = 5;
+    private static double lastNozzleSizeMillimeters = 0.4;
+    private static double lastPrintThicknessMillimeters = 0.2;
 
     public override string EnglishName => "PrintSupport";
 
@@ -35,135 +33,84 @@ public sealed class PrintSupportCommand : Command
             return Result.Failure;
         }
 
-        var thickness = new OptionDouble(
-            lastThicknessMillimeters * millimetersToDocument,
-            true,
-            doc.ModelAbsoluteTolerance);
-        var clearance = new OptionDouble(
-            lastClearanceMillimeters * millimetersToDocument,
-            true,
-            0.0);
-        var contactWidth = new OptionDouble(
-            lastContactWidthMillimeters * millimetersToDocument,
-            true,
-            doc.ModelAbsoluteTolerance);
-        var contactSpacing = new OptionDouble(
-            lastContactSpacingMillimeters * millimetersToDocument,
-            true,
-            doc.ModelAbsoluteTolerance);
-        var tipLineWidth = new OptionDouble(
-            lastTipLineWidthMillimeters * millimetersToDocument,
-            true,
-            doc.ModelAbsoluteTolerance);
-        var footExtension = new OptionDouble(
-            lastFootExtensionMillimeters * millimetersToDocument,
-            true,
-            0.0);
-        var baseHeight = new OptionDouble(lastBaseHeight);
-        var inputModes = new[]
+        var printThickness = new OptionDouble(lastPrintThicknessMillimeters * millimetersToDocument, true, doc.ModelAbsoluteTolerance);
+        var nozzleSize = new OptionDouble(lastNozzleSizeMillimeters * millimetersToDocument, true, doc.ModelAbsoluteTolerance);
+        using (var printOptions = new GetOption())
         {
-            new LocalizeStringPair("ProfileEdge", "輪廓邊接觸齒"),
-            new LocalizeStringPair("Outline", "自訂輪廓"),
-            new LocalizeStringPair("Guide", "導引曲線")
-        };
+            printOptions.SetCommandPrompt($"第 1 層：設定列印尺寸（目前文件單位：{doc.ModelUnitSystem}），Enter 選擇支撐類型");
+            printOptions.AcceptNothing(true);
+            printOptions.AddOptionDouble(new LocalizeStringPair("NozzleSize", "列印噴頭尺寸"), ref nozzleSize);
+            printOptions.AddOptionDouble(new LocalizeStringPair("PrintThickness", "列印層高尺寸"), ref printThickness);
+            while (true)
+            {
+                var getResult = printOptions.Get();
+                if (getResult == GetResult.Cancel) return Result.Cancel;
+                if (getResult == GetResult.Nothing) break;
+                if (getResult != GetResult.Option) return Result.Failure;
+            }
+        }
 
-        var options = new GetOption();
-        options.SetCommandPrompt(
-            $"設定輕觸式支撐參數（目前文件單位：{doc.ModelUnitSystem}），完成後按 Enter");
-        options.AcceptNothing(true);
-
-        var inputMode = lastInputMode;
-        while (true)
+        var supportType = lastSupportType;
+        using (var typeOptions = new GetOption())
         {
-            options.ClearCommandOptions();
-            var modeOption = options.AddOptionList(
-                new LocalizeStringPair("Mode", "建立模式"),
-                inputModes,
-                (int)inputMode);
-            options.AddOptionDouble(
-                new LocalizeStringPair("Thickness", "支撐厚度"),
-                ref thickness);
-            if (inputMode == SupportInputMode.ProfileEdge)
+            typeOptions.SetCommandPrompt("第 2 層：選擇支撐類型");
+            typeOptions.SetCommandPromptDefault(supportType == 1 ? "桁架式支撐" : "輪廓邊接觸齒");
+            typeOptions.AcceptNothing(true);
+            var trussOption = typeOptions.AddOption(new LocalizeStringPair("Truss", "桁架式支撐"));
+            typeOptions.AddOption(new LocalizeStringPair("ProfileEdge", "輪廓邊接觸齒"));
+            var getResult = typeOptions.Get();
+            if (getResult == GetResult.Cancel) return Result.Cancel;
+            if (getResult == GetResult.Option) supportType = typeOptions.OptionIndex() == trussOption ? 1 : 0;
+            else if (getResult != GetResult.Nothing) return Result.Failure;
+        }
+        if (supportType == 1)
+        {
+            var trussResult = RunTrussMode(doc, nozzleSize.CurrentValue, printThickness.CurrentValue, millimetersToDocument);
+            if (trussResult == Result.Success)
             {
-                options.AddOptionDouble(
-                    new LocalizeStringPair("TipLineWidth", "齒尖線寬XY"),
-                    ref tipLineWidth);
+                lastSupportType = 1;
+                lastNozzleSizeMillimeters = nozzleSize.CurrentValue / millimetersToDocument;
+                lastPrintThicknessMillimeters = printThickness.CurrentValue / millimetersToDocument;
             }
-            var clearanceOption = inputMode == SupportInputMode.ProfileEdge
-                ? new LocalizeStringPair("ToothDepth", "齒水平伸長XY")
-                : new LocalizeStringPair("ContactClearance", "接觸退讓");
-            var widthOption = inputMode == SupportInputMode.ProfileEdge
-                ? new LocalizeStringPair("ToothHeightZ", "齒高度Z")
-                : new LocalizeStringPair("ContactWidth", "接觸齒寬");
-            var spacingOption = inputMode == SupportInputMode.ProfileEdge
-                ? new LocalizeStringPair("ToothPitch", "沿線齒距")
-                : new LocalizeStringPair("ContactSpacing", "接觸齒間距");
-            options.AddOptionDouble(clearanceOption, ref clearance);
-            options.AddOptionDouble(widthOption, ref contactWidth);
-            options.AddOptionDouble(spacingOption, ref contactSpacing);
-            if (inputMode == SupportInputMode.Guide)
+            return trussResult;
+        }
+
+        var thickness = new OptionDouble(lastThicknessMillimeters * millimetersToDocument, true, doc.ModelAbsoluteTolerance);
+        var toothLength = new OptionDouble(lastToothLengthMillimeters * millimetersToDocument, true, 0.0);
+        var toothCount = new OptionInteger(lastToothCount, 2, 512);
+        using (var profileOptions = new GetOption())
+        {
+            profileOptions.SetCommandPrompt("第 3 層：設定輪廓邊接觸齒參數；尺寸採文件單位，Enter 選取輪廓");
+            profileOptions.AcceptNothing(true);
+            profileOptions.AddOptionDouble(new LocalizeStringPair("Thickness", "支撐厚度"), ref thickness);
+            profileOptions.AddOptionDouble(new LocalizeStringPair("ToothDepth", "齒尖長"), ref toothLength);
+            profileOptions.AddOptionInteger(new LocalizeStringPair("ToothCount", "沿線齒尖數量均分"), ref toothCount);
+            while (true)
             {
-                options.AddOptionDouble(
-                    new LocalizeStringPair("FootExtension", "底腳延伸"),
-                    ref footExtension);
-                options.AddOptionDouble(
-                    new LocalizeStringPair("BaseHeight", "平台高度"),
-                    ref baseHeight);
+                var getResult = profileOptions.Get();
+                if (getResult == GetResult.Cancel) return Result.Cancel;
+                if (getResult == GetResult.Nothing) break;
+                if (getResult != GetResult.Option) return Result.Failure;
             }
-
-            var getResult = options.Get();
-            if (getResult == GetResult.Cancel)
-                return Result.Cancel;
-            if (getResult == GetResult.Nothing)
-                break;
-            if (getResult != GetResult.Option)
-                return Result.Failure;
-
-            if (options.OptionIndex() == modeOption)
-                inputMode = (SupportInputMode)options.Option().CurrentListOptionIndex;
         }
 
         var parameters = new SupportParameters(
-            thickness.CurrentValue,
-            clearance.CurrentValue,
-            contactWidth.CurrentValue,
-            contactSpacing.CurrentValue,
-            footExtension.CurrentValue,
-            baseHeight.CurrentValue);
+            thickness.CurrentValue, toothLength.CurrentValue, printThickness.CurrentValue);
         if (!parameters.IsValid(doc.ModelAbsoluteTolerance, out var validationError))
         {
             RhinoApp.WriteLine($"無法建立支撐：{validationError}");
             return Result.Failure;
         }
 
-        var result = inputMode switch
-        {
-            SupportInputMode.ProfileEdge =>
-                RunProfileEdgeMode(
-                    doc,
-                    parameters,
-                    tipLineWidth.CurrentValue,
-                    millimetersToDocument),
-            SupportInputMode.Outline =>
-                RunOutlineMode(doc, parameters, millimetersToDocument),
-            _ =>
-                RunGuideMode(doc, parameters, millimetersToDocument)
-        };
-        if (result != Result.Success)
-            return result;
-
-        lastInputMode = inputMode;
+        var result = RunProfileEdgeMode(doc, parameters, nozzleSize.CurrentValue,
+            toothCount.CurrentValue, millimetersToDocument);
+        if (result != Result.Success) return result;
+        lastSupportType = 0;
         lastThicknessMillimeters = thickness.CurrentValue / millimetersToDocument;
-        lastClearanceMillimeters = clearance.CurrentValue / millimetersToDocument;
-        lastContactWidthMillimeters = contactWidth.CurrentValue / millimetersToDocument;
-        lastContactSpacingMillimeters = contactSpacing.CurrentValue / millimetersToDocument;
-        if (inputMode == SupportInputMode.ProfileEdge)
-        {
-            lastTipLineWidthMillimeters =
-                tipLineWidth.CurrentValue / millimetersToDocument;
-        }
-        lastFootExtensionMillimeters = footExtension.CurrentValue / millimetersToDocument;
-        lastBaseHeight = baseHeight.CurrentValue;
+        lastPrintThicknessMillimeters = printThickness.CurrentValue / millimetersToDocument;
+        lastToothLengthMillimeters = toothLength.CurrentValue / millimetersToDocument;
+        lastNozzleSizeMillimeters = nozzleSize.CurrentValue / millimetersToDocument;
+        lastToothCount = toothCount.CurrentValue;
         return Result.Success;
     }
 
@@ -171,6 +118,7 @@ public sealed class PrintSupportCommand : Command
         RhinoDoc doc,
         SupportParameters parameters,
         double tipLineWidth,
+        int toothCount,
         double millimetersToDocument)
     {
         using var outlineGetter = new GetObject();
@@ -226,6 +174,7 @@ public sealed class PrintSupportCommand : Command
             contactSegment,
             parameters,
             tipLineWidth,
+            toothCount,
             doc.ModelAbsoluteTolerance,
             out var contactCount,
             out var buildReport,
@@ -240,9 +189,7 @@ public sealed class PrintSupportCommand : Command
             1,
             parameters,
             contactCount,
-            millimetersToDocument,
-            "ProfileEdge",
-            null);
+            millimetersToDocument);
         attributes.SetUserString(
             "PrintSupport.SourceCurveId",
             outlineReference.ObjectId.ToString());
@@ -256,8 +203,12 @@ public sealed class PrintSupportCommand : Command
             "PrintSupport.ToothHeightZMm",
             (parameters.ContactWidth / millimetersToDocument).ToString("G"));
         attributes.SetUserString(
-            "PrintSupport.ToothPitchMm",
-            (parameters.ContactSpacing / millimetersToDocument).ToString("G"));
+            "PrintSupport.ToothCount",
+            toothCount.ToString());
+        attributes.SetUserString("PrintSupport.PrintThicknessMm",
+            (parameters.ContactWidth / millimetersToDocument).ToString("G"));
+        attributes.SetUserString("PrintSupport.NozzleSizeMm",
+            (tipLineWidth / millimetersToDocument).ToString("G"));
         attributes.SetUserString(
             "PrintSupport.TipLineWidthMm",
             (tipLineWidth / millimetersToDocument).ToString("G"));
@@ -266,7 +217,7 @@ public sealed class PrintSupportCommand : Command
             "WorldXYHorizontal");
         attributes.SetUserString(
             "PrintSupport.ToothDistribution",
-            "AlongContactEdge");
+            "EqualArcLengthIncludingEnds");
         attributes.SetUserString(
             "PrintSupport.ChamferDistanceMm",
             (buildReport.ActualChamferDistance / millimetersToDocument)
@@ -317,7 +268,7 @@ public sealed class PrintSupportCommand : Command
         {
             RhinoApp.WriteLine(
                 "注意：貼邊方塊齒的批次合併失敗，已改為逐顆合併；" +
-                "失敗齒已略過，其他有效接觸齒保留。");
+                "全部指定接觸齒均已保留。");
         }
         if (buildReport.SkippedCount > 0)
         {
@@ -333,7 +284,7 @@ public sealed class PrintSupportCommand : Command
             $"貼邊方塊齒 W×H×D = {(tipLineWidth / millimetersToDocument):G} × " +
             $"{(parameters.ContactWidth / millimetersToDocument):G} × " +
             $"{(parameters.ContactClearance / millimetersToDocument):G} mm、" +
-            $"沿線齒距 {(parameters.ContactSpacing / millimetersToDocument):G} mm。");
+            $"沿線齒尖數量均分 {toothCount} 顆（包含頭尾）。");
         return Result.Success;
     }
 
@@ -440,309 +391,18 @@ public sealed class PrintSupportCommand : Command
         return closestIndex;
     }
 
-    private static Result RunOutlineMode(
-        RhinoDoc doc,
-        SupportParameters parameters,
-        double millimetersToDocument)
-    {
-        using var targetGetter = new GetObject();
-        targetGetter.SetCommandPrompt(
-            "選取由 ExtractSrf（Copy=Yes）複製出的接觸面；也可選完整模型，按 Enter 完成");
-        targetGetter.GeometryFilter =
-            ObjectType.Surface |
-            ObjectType.Brep |
-            ObjectType.Extrusion |
-            ObjectType.Mesh |
-            ObjectType.SubD |
-            ObjectType.InstanceReference;
-        targetGetter.GroupSelect = true;
-        targetGetter.SubObjectSelect = false;
-        targetGetter.GetMultiple(1, 0);
-        if (targetGetter.CommandResult() != Result.Success)
-            return targetGetter.CommandResult();
-
-        var targets = new List<GeometryBase>();
-        var targetIds = new List<Guid>();
-        var rejectedTypes = new List<string>();
-        for (var i = 0; i < targetGetter.ObjectCount; i++)
-        {
-            var objectReference = targetGetter.Object(i);
-            var addedTargetCount = AppendTargetGeometry(objectReference, targets);
-            if (addedTargetCount == 0)
-            {
-                rejectedTypes.Add(
-                    objectReference.Object()?.ObjectType.ToString() ??
-                    objectReference.Geometry()?.GetType().Name ??
-                    "Unknown");
-                continue;
-            }
-
-            targetIds.Add(objectReference.ObjectId);
-        }
-
-        if (targets.Count == 0)
-        {
-            var selectedTypes = rejectedTypes.Count > 0
-                ? $" 所選類型：{string.Join(", ", rejectedTypes.Distinct())}。"
-                : string.Empty;
-            RhinoApp.WriteLine(
-                "沒有取得可用的接觸面或目標幾何；" +
-                "建議先用 ExtractSrf（Copy=Yes）複製單一接觸面，" +
-                "也支援多重曲面、擠出、Mesh、SubD 與 Block。" +
-                selectedTypes);
-            return Result.Failure;
-        }
-
-        using var outlineGetter = new GetObject();
-        outlineGetter.SetCommandPrompt(
-            "選取閉合平面支撐輪廓；讓輪廓完整跨過接觸面剖線並稍微穿入，按 Enter 完成");
-        outlineGetter.GeometryFilter = ObjectType.Curve;
-        outlineGetter.GroupSelect = true;
-        outlineGetter.SubObjectSelect = false;
-        outlineGetter.GetMultiple(1, 0);
-        if (outlineGetter.CommandResult() != Result.Success)
-            return outlineGetter.CommandResult();
-
-        var inputCurves = new List<Curve>();
-        for (var i = 0; i < outlineGetter.ObjectCount; i++)
-        {
-            var curve = outlineGetter.Object(i).Curve();
-            if (curve is not null)
-                inputCurves.Add(curve.DuplicateCurve());
-        }
-
-        if (inputCurves.Count == 0)
-        {
-            RhinoApp.WriteLine("沒有取得可用的自訂支撐輪廓。");
-            return Result.Failure;
-        }
-
-        var joinedOutlines = Curve.JoinCurves(
-            inputCurves,
-            doc.ModelAbsoluteTolerance,
-            false);
-        var added = 0;
-        var failures = new List<string>();
-        var warnings = new List<string>();
-        for (var i = 0; i < joinedOutlines.Length; i++)
-        {
-            var support = OutlineSupportBuilder.Create(
-                targets,
-                joinedOutlines[i],
-                parameters,
-                doc.ModelAbsoluteTolerance,
-                out var contactCount,
-                out var warning,
-                out var error);
-            if (support is null)
-            {
-                failures.Add($"輪廓 {i + 1}: {error}");
-                continue;
-            }
-
-            var attributes = CreateAttributes(
-                added + 1,
-                parameters,
-                contactCount,
-                millimetersToDocument,
-                "Outline",
-                targetIds);
-            if (doc.Objects.AddBrep(support, attributes) == Guid.Empty)
-            {
-                failures.Add($"輪廓 {i + 1}: 無法把支撐加入文件。");
-                continue;
-            }
-
-            if (!string.IsNullOrWhiteSpace(warning))
-                warnings.Add($"輪廓 {i + 1}: {warning}");
-            added++;
-        }
-
-        if (added == 0)
-        {
-            foreach (var failure in failures)
-                RhinoApp.WriteLine(failure);
-            return Result.Failure;
-        }
-
-        doc.Views.Redraw();
-        RhinoApp.WriteLine(
-            $"已建立 {added} 個自訂輪廓輕觸式支撐；" +
-            "原模型與手繪輪廓均保留，請勿與模型做布林聯集。");
-        foreach (var warning in warnings)
-            RhinoApp.WriteLine($"注意：{warning}");
-        foreach (var failure in failures)
-            RhinoApp.WriteLine($"略過：{failure}");
-        return Result.Success;
-    }
-
-    private static Result RunGuideMode(
-        RhinoDoc doc,
-        SupportParameters parameters,
-        double millimetersToDocument)
-    {
-        using var curveGetter = new GetObject();
-        curveGetter.SetCommandPrompt(
-            "選取位於模型接觸邊界的開放平面曲線（可選取多段剖面曲線）");
-        curveGetter.GeometryFilter = ObjectType.Curve;
-        curveGetter.GroupSelect = true;
-        curveGetter.SubObjectSelect = false;
-        curveGetter.GetMultiple(1, 0);
-        if (curveGetter.CommandResult() != Result.Success)
-            return curveGetter.CommandResult();
-
-        var inputCurves = new List<Curve>();
-        for (var i = 0; i < curveGetter.ObjectCount; i++)
-        {
-            var curve = curveGetter.Object(i).Curve();
-            if (curve is not null)
-                inputCurves.Add(curve.DuplicateCurve());
-        }
-
-        if (inputCurves.Count == 0)
-        {
-            RhinoApp.WriteLine("沒有取得可用的導引曲線。");
-            return Result.Failure;
-        }
-
-        var joinedCurves = Curve.JoinCurves(
-            inputCurves,
-            doc.ModelAbsoluteTolerance,
-            false);
-        var added = 0;
-        var failures = new List<string>();
-        for (var i = 0; i < joinedCurves.Length; i++)
-        {
-            var support = SupportStructureBuilder.Create(
-                joinedCurves[i],
-                parameters,
-                doc.ModelAbsoluteTolerance,
-                out var contactCount,
-                out var error);
-            if (support is null)
-            {
-                failures.Add($"曲線 {i + 1}: {error}");
-                continue;
-            }
-
-            var attributes = CreateAttributes(
-                added + 1,
-                parameters,
-                contactCount,
-                millimetersToDocument,
-                "Guide",
-                null);
-            if (doc.Objects.AddBrep(support, attributes) == Guid.Empty)
-            {
-                failures.Add($"曲線 {i + 1}: 無法把支撐加入文件。");
-                continue;
-            }
-
-            added++;
-        }
-
-        if (added == 0)
-        {
-            foreach (var failure in failures)
-                RhinoApp.WriteLine(failure);
-            return Result.Failure;
-        }
-
-        doc.Views.Redraw();
-        RhinoApp.WriteLine(
-            $"已建立 {added} 個導引曲線輕觸式支撐；" +
-            $"主肋退讓 {parameters.ContactClearance / millimetersToDocument:0.###} mm，" +
-            "請勿與模型做布林聯集。");
-        foreach (var failure in failures)
-            RhinoApp.WriteLine($"略過：{failure}");
-        return Result.Success;
-    }
-
-    private static int AppendTargetGeometry(
-        ObjRef objectReference,
-        ICollection<GeometryBase> targets)
-    {
-        if (objectReference.Object() is InstanceObject instanceObject)
-        {
-            instanceObject.Explode(
-                true,
-                out var pieces,
-                out _,
-                out var transforms);
-            if (pieces is null || transforms is null)
-                return 0;
-
-            var added = 0;
-            for (var i = 0; i < Math.Min(pieces.Length, transforms.Length); i++)
-            {
-                added += AppendTargetGeometry(
-                    pieces[i].Geometry,
-                    transforms[i],
-                    targets);
-            }
-            return added;
-        }
-
-        return AppendTargetGeometry(
-            objectReference.Geometry(),
-            Transform.Identity,
-            targets);
-    }
-
-    private static int AppendTargetGeometry(
-        GeometryBase? geometry,
-        Transform transform,
-        ICollection<GeometryBase> targets)
-    {
-        if (geometry is null)
-            return 0;
-
-        var duplicate = geometry.Duplicate();
-        if (duplicate is null)
-            return 0;
-
-        if (!transform.IsValid ||
-            (!transform.IsIdentity && !duplicate.Transform(transform)))
-            return 0;
-
-        if (!duplicate.IsValid)
-            return 0;
-
-        switch (duplicate)
-        {
-            case Brep:
-            case Extrusion:
-            case Mesh:
-            case SubD:
-            case Surface:
-                targets.Add(duplicate);
-                return 1;
-            default:
-                {
-                    var converted = Brep.TryConvertBrep(duplicate);
-                    if (converted is null || !converted.IsValid)
-                        return 0;
-
-                    targets.Add(converted.DuplicateBrep());
-                    return 1;
-                }
-        }
-    }
-
     private static ObjectAttributes CreateAttributes(
         int index,
         SupportParameters parameters,
         int contactCount,
-        double millimetersToDocument,
-        string inputMode,
-        IReadOnlyList<Guid>? targetIds)
+        double millimetersToDocument)
     {
         var attributes = new ObjectAttributes
         {
             Name = $"PrintSupport_LightTouch_{index:00}"
         };
         attributes.SetUserString("PrintSupport.Type", "LightTouchFin");
-        attributes.SetUserString("PrintSupport.Mode", inputMode);
+        attributes.SetUserString("PrintSupport.Mode", "ProfileEdge");
         attributes.SetUserString(
             "PrintSupport.ThicknessMm",
             (parameters.Thickness / millimetersToDocument).ToString("G"));
@@ -752,27 +412,7 @@ public sealed class PrintSupportCommand : Command
         attributes.SetUserString(
             "PrintSupport.ContactWidthMm",
             (parameters.ContactWidth / millimetersToDocument).ToString("G"));
-        attributes.SetUserString(
-            "PrintSupport.ContactSpacingMm",
-            (parameters.ContactSpacing / millimetersToDocument).ToString("G"));
         attributes.SetUserString("PrintSupport.ContactCount", contactCount.ToString());
-        attributes.SetUserString(
-            "PrintSupport.FootExtensionMm",
-            (parameters.FootExtension / millimetersToDocument).ToString("G"));
-        attributes.SetUserString("PrintSupport.BaseHeight", parameters.BaseHeight.ToString("G"));
-        if (targetIds is not null && targetIds.Count > 0)
-        {
-            attributes.SetUserString(
-                "PrintSupport.TargetIds",
-                string.Join(",", targetIds));
-        }
         return attributes;
-    }
-
-    private enum SupportInputMode
-    {
-        ProfileEdge,
-        Outline,
-        Guide
     }
 }
